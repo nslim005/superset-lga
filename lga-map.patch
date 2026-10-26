@@ -1,0 +1,1273 @@
+diff --git a/Dockerfile.lga b/Dockerfile.lga
+new file mode 100644
+index 0000000..e448b90
+--- /dev/null
++++ b/Dockerfile.lga
+@@ -0,0 +1,18 @@
++# Builds only the Superset frontend (with the LGA Count Map chart) and lays it
++# over the stock Superset image, so the Python side stays exactly as released.
++ARG BASE_IMAGE=apache/superset:6.1.0
++
++FROM node:22-trixie-slim AS fe
++ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
++    NODE_OPTIONS=--max_old_space_size=8192
++COPY docker/ /app/docker/
++RUN /app/docker/apt-install.sh build-essential python3 zstd
++WORKDIR /app/superset-frontend
++RUN mkdir -p /app/superset/static/assets /app/superset/translations
++COPY superset-frontend/package.json superset-frontend/package-lock.json ./
++RUN npm ci
++COPY superset-frontend /app/superset-frontend
++RUN npm run build
++
++FROM ${BASE_IMAGE}
++COPY --from=fe --chown=superset:superset /app/superset/static/assets /app/superset/static/assets
+diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/EchartsLgaMap.tsx b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/EchartsLgaMap.tsx
+new file mode 100644
+index 0000000..8bdc442
+--- /dev/null
++++ b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/EchartsLgaMap.tsx
+@@ -0,0 +1,40 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++import { LgaMapChartTransformedProps } from './types';
++import Echart from '../components/Echart';
++import { allEventHandlers } from '../utils/eventHandlers';
++
++export default function EchartsLgaMap(props: LgaMapChartTransformedProps) {
++  const { height, width, echartOptions, selectedValues, refs, formData } =
++    props;
++
++  const eventHandlers = allEventHandlers(props);
++
++  return (
++    <Echart
++      refs={refs}
++      height={height}
++      width={width}
++      echartOptions={echartOptions}
++      eventHandlers={eventHandlers}
++      selectedValues={selectedValues}
++      vizType={formData.vizType}
++    />
++  );
++}
+diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/buildQuery.ts b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/buildQuery.ts
+new file mode 100644
+index 0000000..cf99ef1
+--- /dev/null
++++ b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/buildQuery.ts
+@@ -0,0 +1,36 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++import { buildQueryContext, QueryFormData } from '@superset-ui/core';
++
++export default function buildQuery(formData: QueryFormData) {
++  const { metric, geom_column: geomColumn } = formData;
++  return buildQueryContext(formData, baseQueryObject => {
++    const columns = [...(baseQueryObject.columns || [])];
++    if (typeof geomColumn === 'string' && !columns.includes(geomColumn)) {
++      columns.push(geomColumn);
++    }
++    return [
++      {
++        ...baseQueryObject,
++        columns,
++        ...(metric && { orderby: [[metric, false]] }),
++      },
++    ];
++  });
++}
+diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/controlPanel.tsx b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/controlPanel.tsx
+new file mode 100644
+index 0000000..df96d44
+--- /dev/null
++++ b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/controlPanel.tsx
+@@ -0,0 +1,162 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++import { t } from '@apache-superset/core/translation';
++import {
++  ControlPanelConfig,
++  D3_FORMAT_DOCS,
++  D3_FORMAT_OPTIONS,
++  D3_NUMBER_FORMAT_DESCRIPTION_VALUES_TEXT,
++  getStandardizedControls,
++  sharedControls,
++} from '@superset-ui/chart-controls';
++import { DEFAULT_FORM_DATA } from './types';
++
++const { numberFormat, showLabels, showLegend, labelFontSize, hideZeroCounts } =
++  DEFAULT_FORM_DATA;
++
++const config: ControlPanelConfig = {
++  controlPanelSections: [
++    {
++      label: t('Query'),
++      expanded: true,
++      controlSetRows: [
++        [
++          {
++            name: 'groupby',
++            config: {
++              ...sharedControls.groupby,
++              label: t('Area name column(s)'),
++              description: t(
++                'Column(s) that name each area, for example lga. Clicking an area filters the dashboard by these columns.',
++              ),
++            },
++          },
++        ],
++        [
++          {
++            name: 'geom_column',
++            config: {
++              ...sharedControls.entity,
++              label: t('GeoJSON geometry column'),
++              description: t(
++                'Column holding the area outline as GeoJSON text (Polygon or MultiPolygon).',
++              ),
++            },
++          },
++        ],
++        ['metric'],
++        ['adhoc_filters'],
++        [
++          {
++            name: 'row_limit',
++            config: {
++              ...sharedControls.row_limit,
++              default: 1000,
++            },
++          },
++        ],
++      ],
++    },
++    {
++      label: t('Chart Options'),
++      expanded: true,
++      controlSetRows: [
++        ['linear_color_scheme'],
++        [
++          {
++            name: 'number_format',
++            config: {
++              type: 'SelectControl',
++              freeForm: true,
++              label: t('Number format'),
++              renderTrigger: true,
++              default: numberFormat,
++              choices: D3_FORMAT_OPTIONS,
++              description: `${D3_FORMAT_DOCS} ${D3_NUMBER_FORMAT_DESCRIPTION_VALUES_TEXT}`,
++            },
++          },
++        ],
++        [
++          {
++            name: 'show_labels',
++            config: {
++              type: 'CheckboxControl',
++              label: t('Show name and count on each area'),
++              renderTrigger: true,
++              default: showLabels,
++              description: t('Print the area name and its count on the map.'),
++            },
++          },
++        ],
++        [
++          {
++            name: 'hide_zero_counts',
++            config: {
++              type: 'CheckboxControl',
++              label: t('Hide labels for areas with a zero count'),
++              renderTrigger: true,
++              default: hideZeroCounts,
++              description: t('Areas without data stay on the map without a label.'),
++            },
++          },
++        ],
++        [
++          {
++            name: 'label_font_size',
++            config: {
++              type: 'SelectControl',
++              freeForm: true,
++              label: t('Label font size'),
++              renderTrigger: true,
++              default: labelFontSize,
++              choices: [
++                [8, '8'],
++                [9, '9'],
++                [10, '10'],
++                [11, '11'],
++                [12, '12'],
++                [14, '14'],
++              ],
++              description: t('Font size of the labels, in pixels.'),
++            },
++          },
++        ],
++        [
++          {
++            name: 'show_legend',
++            config: {
++              type: 'CheckboxControl',
++              label: t('Show colour scale'),
++              renderTrigger: true,
++              default: showLegend,
++              description: t('Show the colour scale in the corner of the map.'),
++            },
++          },
++        ],
++      ],
++    },
++  ],
++  formDataOverrides: formData => ({
++    ...formData,
++    metric: getStandardizedControls().shiftMetric(),
++    groupby: getStandardizedControls().popAllColumns(),
++  }),
++};
++
++export default config;
+diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/images/example-dark.jpg b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/images/example-dark.jpg
+new file mode 100644
+index 0000000000000000000000000000000000000000..832d7d77e6ae94dccb4b742218de6c93ce5b2978
+GIT binary patch
+literal 14064
+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
+S9Qd09e{<lk<pBP}+`j?+qfGe#
+
+literal 0
+HcmV?d00001
+
+diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/images/example.jpg b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/images/example.jpg
+new file mode 100644
+index 0000000000000000000000000000000000000000..0f198147e9119ba6a79a941ba85aff8f6eec6562
+GIT binary patch
+literal 14311
+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
+C9nn$%
+
+literal 0
+HcmV?d00001
+
+diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/images/thumbnail-dark.png b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/images/thumbnail-dark.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..884705ac470047dc986e8c33245eeee8bb6c46c1
+GIT binary patch
+literal 5572
+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
+bMQ3SFzXV{ViK{biX92hL?jnkH9)<l6+0NGe
+
+literal 0
+HcmV?d00001
+
+diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/images/thumbnail.png b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/images/thumbnail.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..b220f91774b5841202c4f5d1416df2aa3f68f719
+GIT binary patch
+literal 5549
+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
+WQgh5C%CmmM0`za(L4MalKmQL5jMC)*
+
+literal 0
+HcmV?d00001
+
+diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/index.ts b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/index.ts
+new file mode 100644
+index 0000000..c080630
+--- /dev/null
++++ b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/index.ts
+@@ -0,0 +1,56 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++import { t } from '@apache-superset/core/translation';
++import { Behavior } from '@superset-ui/core';
++import buildQuery from './buildQuery';
++import controlPanel from './controlPanel';
++import transformProps from './transformProps';
++import thumbnail from './images/thumbnail.png';
++import thumbnailDark from './images/thumbnail-dark.png';
++import example from './images/example.jpg';
++import exampleDark from './images/example-dark.jpg';
++import { EchartsLgaMapChartProps, EchartsLgaMapFormData } from './types';
++import { EchartsChartPlugin } from '../types';
++
++export default class EchartsLgaMapChartPlugin extends EchartsChartPlugin<
++  EchartsLgaMapFormData,
++  EchartsLgaMapChartProps
++> {
++  constructor() {
++    super({
++      buildQuery,
++      controlPanel,
++      loadChart: () => import('./EchartsLgaMap'),
++      metadata: {
++        behaviors: [Behavior.InteractiveChart, Behavior.DrillToDetail],
++        category: t('Map'),
++        credits: ['https://echarts.apache.org'],
++        description: t(
++          'Area map drawn from GeoJSON outlines stored in a dataset column. Each area is coloured by a metric and shows its name and count; clicking an area filters the dashboard.',
++        ),
++        exampleGallery: [{ url: example, urlDark: exampleDark }],
++        name: t('LGA Count Map'),
++        tags: [t('Geo'), t('ECharts'), t('Map'), t('Report')],
++        thumbnail,
++        thumbnailDark,
++      },
++      transformProps,
++    });
++  }
++}
+diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/transformProps.ts b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/transformProps.ts
+new file mode 100644
+index 0000000..f19b4ed
+--- /dev/null
++++ b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/transformProps.ts
+@@ -0,0 +1,201 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++import {
++  DataRecord,
++  getColumnLabel,
++  getMetricLabel,
++  getNumberFormatter,
++  getSequentialSchemeRegistry,
++} from '@superset-ui/core';
++import { registerMap } from 'echarts/core';
++import type { CallbackDataParams } from 'echarts/types/src/util/types';
++import type { EChartsCoreOption } from 'echarts/core';
++import {
++  DEFAULT_FORM_DATA,
++  EchartsLgaMapChartProps,
++  LgaMapChartTransformedProps,
++} from './types';
++import { extractGroupbyLabel, getColtypesMapping, sanitizeHtml } from '../utils/series';
++import { Refs } from '../types';
++
++const FALLBACK_COLORS = ['#e8f5e9', '#a5d6a7', '#66bb6a', '#2e7d32', '#1b5e20'];
++
++type GeoFeature = {
++  type: 'Feature';
++  properties: { name: string };
++  geometry: unknown;
++};
++
++function parseGeometry(raw: unknown): unknown | null {
++  if (!raw) return null;
++  if (typeof raw === 'object') return raw;
++  try {
++    return JSON.parse(String(raw));
++  } catch {
++    return null;
++  }
++}
++
++export default function transformProps(
++  chartProps: EchartsLgaMapChartProps,
++): LgaMapChartTransformedProps {
++  const {
++    formData,
++    height,
++    hooks,
++    filterState,
++    queriesData,
++    width,
++    theme,
++    emitCrossFilters,
++  } = chartProps;
++  const data: DataRecord[] = queriesData[0]?.data || [];
++  const coltypeMapping = getColtypesMapping(queriesData[0] || {});
++  const {
++    groupby,
++    geomColumn,
++    metric = '',
++    numberFormat,
++    linearColorScheme,
++    showLabels,
++    showLegend,
++    labelFontSize,
++    hideZeroCounts,
++    sliceId,
++  } = { ...DEFAULT_FORM_DATA, ...formData };
++
++  const refs: Refs = {};
++  const groupbyLabels = groupby.map(getColumnLabel);
++  const geomLabel = geomColumn ? getColumnLabel(geomColumn) : '';
++  const metricLabel = getMetricLabel(metric);
++  const formatter = getNumberFormatter(numberFormat);
++  const { setDataMask = () => {}, onContextMenu } = hooks;
++
++  const features: GeoFeature[] = [];
++  const seriesData: {
++    name: string;
++    value: number;
++    label: { show: boolean; formatter: string };
++  }[] = [];
++  const labelMap: Record<string, string[]> = {};
++  let maxValue = 0;
++
++  data.forEach(datum => {
++    const key = extractGroupbyLabel({
++      datum,
++      groupby: groupbyLabels,
++      coltypeMapping: {},
++    });
++    const geometry = parseGeometry(geomLabel ? datum[geomLabel] : null);
++    if (!key || !geometry) return;
++    const value = Number(datum[metricLabel] ?? 0) || 0;
++    maxValue = Math.max(maxValue, value);
++    features.push({ type: 'Feature', properties: { name: key }, geometry });
++    labelMap[key] = groupbyLabels.map(col => datum[col] as string);
++    const shortName = String(datum[groupbyLabels[groupbyLabels.length - 1]] ?? key);
++    seriesData.push({
++      name: key,
++      value,
++      label: {
++        show: showLabels && !(hideZeroCounts && value === 0),
++        formatter: `${shortName}\n${formatter(value)}`,
++      },
++    });
++  });
++
++  const mapName = `lga_map_${sliceId ?? 'preview'}`;
++  registerMap(mapName, { type: 'FeatureCollection', features } as never);
++
++  const selectedValues = (filterState.selectedValues || []).reduce(
++    (acc: Record<string, string>, selectedValue: string) => {
++      const index = seriesData.findIndex(({ name }) => name === selectedValue);
++      return index >= 0 ? { ...acc, [index]: selectedValue } : acc;
++    },
++    {},
++  );
++
++  const scheme = linearColorScheme
++    ? getSequentialSchemeRegistry().get(linearColorScheme)
++    : undefined;
++  const colors = scheme?.colors?.length ? scheme.colors : FALLBACK_COLORS;
++
++  const echartOptions: EChartsCoreOption = {
++    tooltip: {
++      trigger: 'item',
++      formatter: (params: CallbackDataParams) => {
++        const name = sanitizeHtml(String(params.name ?? ''));
++        const value = Number(params.value);
++        return `${name}<br/>${sanitizeHtml(metricLabel)}: ${
++          Number.isFinite(value) ? formatter(value) : 0
++        }`;
++      },
++    },
++    visualMap: {
++      type: 'continuous',
++      show: showLegend,
++      min: 0,
++      max: maxValue || 1,
++      left: 8,
++      bottom: 8,
++      calculable: false,
++      itemWidth: 12,
++      itemHeight: 90,
++      inRange: { color: colors },
++      textStyle: { color: theme.colorText },
++      formatter: (v: number | string) => formatter(Number(v)),
++    },
++    series: [
++      {
++        type: 'map',
++        map: mapName,
++        nameProperty: 'name',
++        roam: true,
++        aspectScale: 0.99,
++        data: seriesData,
++        itemStyle: { borderColor: '#555555', borderWidth: 0.6 },
++        label: {
++          color: '#111111',
++          fontSize: labelFontSize,
++          lineHeight: labelFontSize + 2,
++        },
++        emphasis: {
++          label: { show: true, color: '#000000', fontWeight: 'bold' },
++          itemStyle: { borderColor: '#000000', borderWidth: 1.4 },
++        },
++        select: { label: { show: true }, itemStyle: { borderColor: '#000000' } },
++        labelLayout: { hideOverlap: true },
++      },
++    ],
++  };
++
++  return {
++    formData,
++    width,
++    height,
++    echartOptions,
++    setDataMask,
++    emitCrossFilters,
++    labelMap,
++    groupby,
++    selectedValues,
++    onContextMenu,
++    refs,
++    coltypeMapping,
++  };
++}
+diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/types.ts b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/types.ts
+new file mode 100644
+index 0000000..37b08c9
+--- /dev/null
++++ b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/types.ts
+@@ -0,0 +1,56 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++import { QueryFormColumn, QueryFormData } from '@superset-ui/core';
++import {
++  BaseChartProps,
++  BaseTransformedProps,
++  ContextMenuTransformedProps,
++  CrossFilterTransformedProps,
++} from '../types';
++
++export type EchartsLgaMapFormData = QueryFormData & {
++  groupby: QueryFormColumn[];
++  geomColumn?: string;
++  metric?: string;
++  numberFormat: string;
++  linearColorScheme?: string;
++  showLabels: boolean;
++  showLegend: boolean;
++  labelFontSize: number;
++  hideZeroCounts: boolean;
++};
++
++export interface EchartsLgaMapChartProps extends BaseChartProps<EchartsLgaMapFormData> {
++  formData: EchartsLgaMapFormData;
++}
++
++// @ts-expect-error
++export const DEFAULT_FORM_DATA: EchartsLgaMapFormData = {
++  groupby: [],
++  numberFormat: ',d',
++  showLabels: true,
++  showLegend: true,
++  labelFontSize: 10,
++  hideZeroCounts: false,
++};
++
++export type LgaMapChartTransformedProps =
++  BaseTransformedProps<EchartsLgaMapFormData> &
++    CrossFilterTransformedProps &
++    ContextMenuTransformedProps;
+diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/components/Echart.tsx b/superset-frontend/plugins/plugin-chart-echarts/src/components/Echart.tsx
+index 95e3148..629d4e4 100644
+--- a/superset-frontend/plugins/plugin-chart-echarts/src/components/Echart.tsx
++++ b/superset-frontend/plugins/plugin-chart-echarts/src/components/Echart.tsx
+@@ -47,6 +47,7 @@ import {
+   HeatmapChart,
+   SunburstChart,
+   CustomChart,
++  MapChart,
+ } from 'echarts/charts';
+ import { CanvasRenderer } from 'echarts/renderers';
+ import {
+@@ -113,6 +114,7 @@ use([
+   TitleComponent,
+   VisualMapComponent,
+   LabelLayout,
++  MapChart,
+ ]);
+ 
+ const loadLocale = async (locale: string) => {
+diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/index.ts b/superset-frontend/plugins/plugin-chart-echarts/src/index.ts
+index abb57d9..ffcc942 100644
+--- a/superset-frontend/plugins/plugin-chart-echarts/src/index.ts
++++ b/superset-frontend/plugins/plugin-chart-echarts/src/index.ts
+@@ -44,6 +44,7 @@ export { default as EchartsBubbleChartPlugin } from './Bubble';
+ export { default as EchartsSankeyChartPlugin } from './Sankey';
+ export { default as EchartsWaterfallChartPlugin } from './Waterfall';
+ export { default as EchartsGanttChartPlugin } from './Gantt';
++export { default as EchartsLgaMapChartPlugin } from './LgaMap';
+ 
+ export { default as BoxPlotTransformProps } from './BoxPlot/transformProps';
+ export { default as FunnelTransformProps } from './Funnel/transformProps';
+diff --git a/superset-frontend/src/visualizations/presets/MainPreset.ts b/superset-frontend/src/visualizations/presets/MainPreset.ts
+index c28dea3..54c9249 100644
+--- a/superset-frontend/src/visualizations/presets/MainPreset.ts
++++ b/superset-frontend/src/visualizations/presets/MainPreset.ts
+@@ -69,6 +69,7 @@ import {
+   BigNumberPeriodOverPeriodChartPlugin,
+   EchartsHeatmapChartPlugin,
+   EchartsGanttChartPlugin,
++  EchartsLgaMapChartPlugin,
+ } from '@superset-ui/plugin-chart-echarts';
+ import {
+   SelectFilterPlugin,
+@@ -124,6 +125,7 @@ export default class MainPreset extends Preset {
+         new EchartsSankeyChartPlugin().configure({ key: VizType.Sankey }),
+         new EchartsTreemapChartPlugin().configure({ key: VizType.Treemap }),
+         new EchartsGanttChartPlugin().configure({ key: VizType.Gantt }),
++        new EchartsLgaMapChartPlugin().configure({ key: 'echarts_lga_map' }),
+         new EchartsGaugeChartPlugin().configure({ key: VizType.Gauge }),
+         new EchartsGraphChartPlugin().configure({ key: VizType.Graph }),
+         new EchartsRadarChartPlugin().configure({ key: VizType.Radar }),
