@@ -952,10 +952,10 @@ index 0000000..c080630
 +}
 diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/transformProps.ts b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/transformProps.ts
 new file mode 100644
-index 0000000..f19b4ed
+index 0000000..459c6d3
 --- /dev/null
 +++ b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/transformProps.ts
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,213 @@
 +/**
 + * Licensed to the Apache Software Foundation (ASF) under one
 + * or more contributor license agreements.  See the NOTICE file
@@ -993,6 +993,15 @@ index 0000000..f19b4ed
 +import { Refs } from '../types';
 +
 +const FALLBACK_COLORS = ['#e8f5e9', '#a5d6a7', '#66bb6a', '#2e7d32', '#1b5e20'];
++
++// DHIS2 names carry a two-letter prefix ("ta Karim-Lamido") and a suffix
++// ("Local Government Area" / "State"); the map shows the plain name.
++function cleanName(raw: string): string {
++  return raw
++    .replace(/^[a-z]{2}\s+/, '')
++    .replace(/\s+(Local Government Area|State)$/i, '')
++    .trim();
++}
 +
 +type GeoFeature = {
 +  type: 'Feature';
@@ -1066,7 +1075,9 @@ index 0000000..f19b4ed
 +    maxValue = Math.max(maxValue, value);
 +    features.push({ type: 'Feature', properties: { name: key }, geometry });
 +    labelMap[key] = groupbyLabels.map(col => datum[col] as string);
-+    const shortName = String(datum[groupbyLabels[groupbyLabels.length - 1]] ?? key);
++    const shortName = cleanName(
++      String(datum[groupbyLabels[groupbyLabels.length - 1]] ?? key),
++    );
 +    seriesData.push({
 +      name: key,
 +      value,
@@ -1097,7 +1108,7 @@ index 0000000..f19b4ed
 +    tooltip: {
 +      trigger: 'item',
 +      formatter: (params: CallbackDataParams) => {
-+        const name = sanitizeHtml(String(params.name ?? ''));
++        const name = sanitizeHtml(cleanName(String(params.name ?? '')));
 +        const value = Number(params.value);
 +        return `${name}<br/>${sanitizeHtml(metricLabel)}: ${
 +          Number.isFinite(value) ? formatter(value) : 0
@@ -1124,6 +1135,7 @@ index 0000000..f19b4ed
 +        map: mapName,
 +        nameProperty: 'name',
 +        roam: true,
++        showLegendSymbol: false,
 +        aspectScale: 0.99,
 +        data: seriesData,
 +        itemStyle: { borderColor: '#555555', borderWidth: 0.6 },
@@ -1159,7 +1171,7 @@ index 0000000..f19b4ed
 +}
 diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/types.ts b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/types.ts
 new file mode 100644
-index 0000000..37b08c9
+index 0000000..a9a9563
 --- /dev/null
 +++ b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/types.ts
 @@ -0,0 +1,56 @@
@@ -1212,7 +1224,7 @@ index 0000000..37b08c9
 +  showLabels: true,
 +  showLegend: true,
 +  labelFontSize: 10,
-+  hideZeroCounts: false,
++  hideZeroCounts: true,
 +};
 +
 +export type LgaMapChartTransformedProps =
