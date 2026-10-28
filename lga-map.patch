@@ -24,10 +24,10 @@ index 0000000..e448b90
 +COPY --from=fe --chown=superset:superset /app/superset/static/assets /app/superset/static/assets
 diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/EchartsLgaMap.tsx b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/EchartsLgaMap.tsx
 new file mode 100644
-index 0000000..8bdc442
+index 0000000..d266cb8
 --- /dev/null
 +++ b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/EchartsLgaMap.tsx
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,49 @@
 +/**
 + * Licensed to the Apache Software Foundation (ASF) under one
 + * or more contributor license agreements.  See the NOTICE file
@@ -54,7 +54,16 @@ index 0000000..8bdc442
 +  const { height, width, echartOptions, selectedValues, refs, formData } =
 +    props;
 +
-+  const eventHandlers = allEventHandlers(props);
++  const allHandlers = allEventHandlers(props);
++  // Only clicks on an area filter the dashboard; clicks on dots are ignored.
++  const eventHandlers = {
++    ...allHandlers,
++    click: (params: { name: string; componentType?: string }) => {
++      if (params.componentType === 'geo') {
++        allHandlers.click?.(params as never);
++      }
++    },
++  };
 +
 +  return (
 +    <Echart
@@ -70,10 +79,10 @@ index 0000000..8bdc442
 +}
 diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/buildQuery.ts b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/buildQuery.ts
 new file mode 100644
-index 0000000..cf99ef1
+index 0000000..ef9e8cb
 --- /dev/null
 +++ b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/buildQuery.ts
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,44 @@
 +/**
 + * Licensed to the Apache Software Foundation (ASF) under one
 + * or more contributor license agreements.  See the NOTICE file
@@ -95,12 +104,20 @@ index 0000000..cf99ef1
 +import { buildQueryContext, QueryFormData } from '@superset-ui/core';
 +
 +export default function buildQuery(formData: QueryFormData) {
-+  const { metric, geom_column: geomColumn } = formData;
++  const {
++    metric,
++    geom_column: geomColumn,
++    lon_column: lonColumn,
++    lat_column: latColumn,
++    point_name_column: pointNameColumn,
++  } = formData;
 +  return buildQueryContext(formData, baseQueryObject => {
 +    const columns = [...(baseQueryObject.columns || [])];
-+    if (typeof geomColumn === 'string' && !columns.includes(geomColumn)) {
-+      columns.push(geomColumn);
-+    }
++    [geomColumn, lonColumn, latColumn, pointNameColumn].forEach(col => {
++      if (typeof col === 'string' && col && !columns.includes(col)) {
++        columns.push(col);
++      }
++    });
 +    return [
 +      {
 +        ...baseQueryObject,
@@ -112,10 +129,10 @@ index 0000000..cf99ef1
 +}
 diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/controlPanel.tsx b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/controlPanel.tsx
 new file mode 100644
-index 0000000..df96d44
+index 0000000..122962b
 --- /dev/null
 +++ b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/controlPanel.tsx
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,254 @@
 +/**
 + * Licensed to the Apache Software Foundation (ASF) under one
 + * or more contributor license agreements.  See the NOTICE file
@@ -145,8 +162,16 @@ index 0000000..df96d44
 +} from '@superset-ui/chart-controls';
 +import { DEFAULT_FORM_DATA } from './types';
 +
-+const { numberFormat, showLabels, showLegend, labelFontSize, hideZeroCounts } =
-+  DEFAULT_FORM_DATA;
++const {
++  numberFormat,
++  showLabels,
++  showLegend,
++  labelFontSize,
++  hideZeroCounts,
++  showPoints,
++  areaStyle,
++  pointColor,
++} = DEFAULT_FORM_DATA;
 +
 +const config: ControlPanelConfig = {
 +  controlPanelSections: [
@@ -178,6 +203,37 @@ index 0000000..df96d44
 +            },
 +          },
 +        ],
++        [
++          {
++            name: 'lon_column',
++            config: {
++              ...sharedControls.entity,
++              label: t('Point longitude column (optional)'),
++              description: t(
++                'Optional. Rows with a longitude and latitude are drawn as dots, for example settlements visited.',
++              ),
++            },
++          },
++        ],
++        [
++          {
++            name: 'lat_column',
++            config: {
++              ...sharedControls.entity,
++              label: t('Point latitude column (optional)'),
++            },
++          },
++        ],
++        [
++          {
++            name: 'point_name_column',
++            config: {
++              ...sharedControls.entity,
++              label: t('Point name column (optional)'),
++              description: t('Name shown when hovering over a dot.'),
++            },
++          },
++        ],
 +        ['metric'],
 +        ['adhoc_filters'],
 +        [
@@ -185,7 +241,7 @@ index 0000000..df96d44
 +            name: 'row_limit',
 +            config: {
 +              ...sharedControls.row_limit,
-+              default: 1000,
++              default: 50000,
 +            },
 +          },
 +        ],
@@ -252,6 +308,59 @@ index 0000000..df96d44
 +                [14, '14'],
 +              ],
 +              description: t('Font size of the labels, in pixels.'),
++            },
++          },
++        ],
++        [
++          {
++            name: 'area_style',
++            config: {
++              type: 'SelectControl',
++              label: t('Area fill'),
++              renderTrigger: true,
++              default: areaStyle,
++              clearable: false,
++              choices: [
++                ['count', t('Shade by metric (with counts)')],
++                ['#eef1f4', t('Light grey, no counts')],
++                ['#e3f2fd', t('Light blue, no counts')],
++                ['#fdf3e1', t('Light sand, no counts')],
++              ],
++              description: t(
++                'Shade each area by its metric and print counts, or draw plain neutral areas so dots stand out.',
++              ),
++            },
++          },
++        ],
++        [
++          {
++            name: 'point_color',
++            config: {
++              type: 'SelectControl',
++              label: t('Point colour'),
++              renderTrigger: true,
++              default: pointColor,
++              clearable: false,
++              choices: [
++                ['#d6336c', t('Pink')],
++                ['#f76707', t('Orange')],
++                ['#1c7ed6', t('Blue')],
++                ['#7048e8', t('Purple')],
++                ['#0ca678', t('Teal')],
++                ['#e03131', t('Red')],
++              ],
++            },
++          },
++        ],
++        [
++          {
++            name: 'show_points',
++            config: {
++              type: 'CheckboxControl',
++              label: t('Show points'),
++              renderTrigger: true,
++              default: showPoints,
++              description: t('Draw dots for rows that have a longitude and latitude.'),
 +            },
 +          },
 +        ],
@@ -952,10 +1061,10 @@ index 0000000..c080630
 +}
 diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/transformProps.ts b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/transformProps.ts
 new file mode 100644
-index 0000000..459c6d3
+index 0000000..8287bc4
 --- /dev/null
 +++ b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/transformProps.ts
-@@ -0,0 +1,213 @@
+@@ -0,0 +1,344 @@
 +/**
 + * Licensed to the Apache Software Foundation (ASF) under one
 + * or more contributor license agreements.  See the NOTICE file
@@ -982,14 +1091,17 @@ index 0000000..459c6d3
 +  getSequentialSchemeRegistry,
 +} from '@superset-ui/core';
 +import { registerMap } from 'echarts/core';
-+import type { CallbackDataParams } from 'echarts/types/src/util/types';
 +import type { EChartsCoreOption } from 'echarts/core';
 +import {
 +  DEFAULT_FORM_DATA,
 +  EchartsLgaMapChartProps,
 +  LgaMapChartTransformedProps,
 +} from './types';
-+import { extractGroupbyLabel, getColtypesMapping, sanitizeHtml } from '../utils/series';
++import {
++  extractGroupbyLabel,
++  getColtypesMapping,
++  sanitizeHtml,
++} from '../utils/series';
 +import { Refs } from '../types';
 +
 +const FALLBACK_COLORS = ['#e8f5e9', '#a5d6a7', '#66bb6a', '#2e7d32', '#1b5e20'];
@@ -1009,6 +1121,8 @@ index 0000000..459c6d3
 +  geometry: unknown;
 +};
 +
++type RGB = [number, number, number];
++
 +function parseGeometry(raw: unknown): unknown | null {
 +  if (!raw) return null;
 +  if (typeof raw === 'object') return raw;
@@ -1017,6 +1131,32 @@ index 0000000..459c6d3
 +  } catch {
 +    return null;
 +  }
++}
++
++function toRgb(color: string): RGB {
++  const hex = color.replace('#', '');
++  const full =
++    hex.length === 3
++      ? hex
++          .split('')
++          .map(c => c + c)
++          .join('')
++      : hex;
++  const n = parseInt(full, 16);
++  if (Number.isNaN(n) || full.length !== 6) return [200, 200, 200];
++  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
++}
++
++function colorAt(colors: string[], t: number): string {
++  const clamped = Math.min(1, Math.max(0, t));
++  if (colors.length === 1) return colors[0];
++  const pos = clamped * (colors.length - 1);
++  const i = Math.min(colors.length - 2, Math.floor(pos));
++  const f = pos - i;
++  const a = toRgb(colors[i]);
++  const b = toRgb(colors[i + 1]);
++  const mix = a.map((v, k) => Math.round(v + (b[k] - v) * f));
++  return `rgb(${mix[0]},${mix[1]},${mix[2]})`;
 +}
 +
 +export default function transformProps(
@@ -1037,11 +1177,17 @@ index 0000000..459c6d3
 +  const {
 +    groupby,
 +    geomColumn,
++    lonColumn,
++    latColumn,
++    pointNameColumn,
 +    metric = '',
 +    numberFormat,
 +    linearColorScheme,
 +    showLabels,
 +    showLegend,
++    showPoints,
++    areaStyle,
++    pointColor,
 +    labelFontSize,
 +    hideZeroCounts,
 +    sliceId,
@@ -1050,108 +1196,202 @@ index 0000000..459c6d3
 +  const refs: Refs = {};
 +  const groupbyLabels = groupby.map(getColumnLabel);
 +  const geomLabel = geomColumn ? getColumnLabel(geomColumn) : '';
++  const lonLabel = lonColumn ? getColumnLabel(lonColumn) : '';
++  const latLabel = latColumn ? getColumnLabel(latColumn) : '';
++  const pointNameLabel = pointNameColumn ? getColumnLabel(pointNameColumn) : '';
 +  const metricLabel = getMetricLabel(metric);
 +  const formatter = getNumberFormatter(numberFormat);
 +  const { setDataMask = () => {}, onContextMenu } = hooks;
 +
 +  const features: GeoFeature[] = [];
-+  const seriesData: {
-+    name: string;
-+    value: number;
-+    label: { show: boolean; formatter: string };
-+  }[] = [];
++  const areaValues: Record<string, number> = {};
++  const areaNames: Record<string, string> = {};
 +  const labelMap: Record<string, string[]> = {};
++  const points: { name: string; value: [number, number, number] }[] = [];
 +  let maxValue = 0;
++  let maxPoint = 0;
 +
 +  data.forEach(datum => {
-+    const key = extractGroupbyLabel({
-+      datum,
-+      groupby: groupbyLabels,
-+      coltypeMapping: {},
-+    });
-+    const geometry = parseGeometry(geomLabel ? datum[geomLabel] : null);
-+    if (!key || !geometry) return;
 +    const value = Number(datum[metricLabel] ?? 0) || 0;
-+    maxValue = Math.max(maxValue, value);
-+    features.push({ type: 'Feature', properties: { name: key }, geometry });
-+    labelMap[key] = groupbyLabels.map(col => datum[col] as string);
-+    const shortName = cleanName(
-+      String(datum[groupbyLabels[groupbyLabels.length - 1]] ?? key),
-+    );
-+    seriesData.push({
-+      name: key,
-+      value,
-+      label: {
-+        show: showLabels && !(hideZeroCounts && value === 0),
-+        formatter: `${shortName}\n${formatter(value)}`,
-+      },
-+    });
++    const geometry = parseGeometry(geomLabel ? datum[geomLabel] : null);
++    if (geometry) {
++      const key = extractGroupbyLabel({
++        datum,
++        groupby: groupbyLabels,
++        coltypeMapping: {},
++      });
++      if (!key) return;
++      maxValue = Math.max(maxValue, value);
++      features.push({ type: 'Feature', properties: { name: key }, geometry });
++      areaValues[key] = value;
++      areaNames[key] = cleanName(
++        String(datum[groupbyLabels[groupbyLabels.length - 1]] ?? key),
++      );
++      labelMap[key] = groupbyLabels.map(col => datum[col] as string);
++      return;
++    }
++    if (showPoints && lonLabel && latLabel) {
++      const lon = Number(datum[lonLabel]);
++      const lat = Number(datum[latLabel]);
++      if (
++        datum[lonLabel] === null ||
++        datum[latLabel] === null ||
++        !Number.isFinite(lon) ||
++        !Number.isFinite(lat)
++      ) {
++        return;
++      }
++      maxPoint = Math.max(maxPoint, value);
++      const lgaName = groupbyLabels.length
++        ? cleanName(String(datum[groupbyLabels[groupbyLabels.length - 1]] ?? ''))
++        : '';
++      const pointName = pointNameLabel
++        ? String(datum[pointNameLabel] ?? '')
++        : '';
++      points.push({
++        name: [pointName, lgaName].filter(Boolean).join(', '),
++        value: [lon, lat, value],
++      });
++    }
 +  });
 +
 +  const mapName = `lga_map_${sliceId ?? 'preview'}`;
 +  registerMap(mapName, { type: 'FeatureCollection', features } as never);
-+
-+  const selectedValues = (filterState.selectedValues || []).reduce(
-+    (acc: Record<string, string>, selectedValue: string) => {
-+      const index = seriesData.findIndex(({ name }) => name === selectedValue);
-+      return index >= 0 ? { ...acc, [index]: selectedValue } : acc;
-+    },
-+    {},
-+  );
 +
 +  const scheme = linearColorScheme
 +    ? getSequentialSchemeRegistry().get(linearColorScheme)
 +    : undefined;
 +  const colors = scheme?.colors?.length ? scheme.colors : FALLBACK_COLORS;
 +
++  const shadeByCount = areaStyle === 'count';
++  const regions = Object.keys(areaValues).map(key => {
++    const value = areaValues[key];
++    return {
++      name: key,
++      itemStyle: {
++        areaColor: shadeByCount
++          ? colorAt(colors, maxValue > 0 ? value / maxValue : 0)
++          : areaStyle,
++      },
++      label: {
++        show: shadeByCount && showLabels && !(hideZeroCounts && value === 0),
++        formatter: `${areaNames[key]}\n${formatter(value)}`,
++      },
++    };
++  });
++
++  const legendGraphic = showLegend && shadeByCount
++    ? [
++        {
++          type: 'group',
++          left: 10,
++          bottom: 10,
++          children: [
++            {
++              type: 'rect',
++              shape: { x: 0, y: 0, width: 14, height: 90 },
++              style: {
++                fill: {
++                  type: 'linear',
++                  x: 0,
++                  y: 0,
++                  x2: 0,
++                  y2: 1,
++                  colorStops: colors
++                    .slice()
++                    .reverse()
++                    .map((c, i, arr) => ({
++                      offset: arr.length > 1 ? i / (arr.length - 1) : 0,
++                      color: c,
++                    })),
++                },
++                stroke: '#888888',
++                lineWidth: 0.5,
++              },
++            },
++            {
++              type: 'text',
++              style: {
++                x: 20,
++                y: 0,
++                text: formatter(maxValue),
++                fill: theme.colorText,
++                fontSize: 11,
++                textVerticalAlign: 'top',
++              },
++            },
++            {
++              type: 'text',
++              style: {
++                x: 20,
++                y: 90,
++                text: formatter(0),
++                fill: theme.colorText,
++                fontSize: 11,
++                textVerticalAlign: 'bottom',
++              },
++            },
++          ],
++        },
++      ]
++    : [];
++
 +  const echartOptions: EChartsCoreOption = {
 +    tooltip: {
 +      trigger: 'item',
-+      formatter: (params: CallbackDataParams) => {
-+        const name = sanitizeHtml(cleanName(String(params.name ?? '')));
-+        const value = Number(params.value);
-+        return `${name}<br/>${sanitizeHtml(metricLabel)}: ${
-+          Number.isFinite(value) ? formatter(value) : 0
-+        }`;
++      formatter: (params: { componentType?: string; name?: string }) => {
++        const key = String(params.name ?? '');
++        if (params.componentType === 'geo') {
++          const value = areaValues[key];
++          return `${sanitizeHtml(areaNames[key] ?? cleanName(key))}<br/>${sanitizeHtml(
++            metricLabel,
++          )}: ${formatter(Number.isFinite(value) ? value : 0)}`;
++        }
++        const point = points.find(p => p.name === key);
++        return `${sanitizeHtml(key)}<br/>${sanitizeHtml(metricLabel)}: ${formatter(
++          point ? point.value[2] : 0,
++        )}`;
 +      },
 +    },
-+    visualMap: {
-+      type: 'continuous',
-+      show: showLegend,
-+      min: 0,
-+      max: maxValue || 1,
-+      left: 8,
-+      bottom: 8,
-+      calculable: false,
-+      itemWidth: 12,
-+      itemHeight: 90,
-+      inRange: { color: colors },
-+      textStyle: { color: theme.colorText },
-+      formatter: (v: number | string) => formatter(Number(v)),
-+    },
-+    series: [
-+      {
-+        type: 'map',
-+        map: mapName,
-+        nameProperty: 'name',
-+        roam: true,
-+        showLegendSymbol: false,
-+        aspectScale: 0.99,
-+        data: seriesData,
-+        itemStyle: { borderColor: '#555555', borderWidth: 0.6 },
-+        label: {
-+          color: '#111111',
-+          fontSize: labelFontSize,
-+          lineHeight: labelFontSize + 2,
-+        },
-+        emphasis: {
-+          label: { show: true, color: '#000000', fontWeight: 'bold' },
-+          itemStyle: { borderColor: '#000000', borderWidth: 1.4 },
-+        },
-+        select: { label: { show: true }, itemStyle: { borderColor: '#000000' } },
-+        labelLayout: { hideOverlap: true },
++    graphic: legendGraphic,
++    geo: {
++      map: mapName,
++      nameProperty: 'name',
++      roam: true,
++      aspectScale: 0.99,
++      itemStyle: { areaColor: '#eeeeee', borderColor: '#555555', borderWidth: 0.6 },
++      label: {
++        show: false,
++        color: '#111111',
++        fontSize: labelFontSize,
++        lineHeight: labelFontSize + 2,
 +      },
-+    ],
++      emphasis: {
++        label: { show: true, color: '#000000', fontWeight: 'bold' },
++        itemStyle: { borderColor: '#000000', borderWidth: 1.4 },
++      },
++      labelLayout: { hideOverlap: true },
++      regions,
++    },
++    series: showPoints
++      ? [
++          {
++            type: 'scatter',
++            coordinateSystem: 'geo',
++            data: points,
++            symbolSize: (value: number[]) =>
++              4 + 8 * Math.sqrt(maxPoint > 0 ? (value[2] || 0) / maxPoint : 0),
++            itemStyle: {
++              color: pointColor,
++              opacity: 0.85,
++              borderColor: '#ffffff',
++              borderWidth: 0.5,
++            },
++            emphasis: { scale: 1.6 },
++            zlevel: 2,
++          },
++        ]
++      : [],
 +  };
 +
 +  return {
@@ -1163,7 +1403,7 @@ index 0000000..459c6d3
 +    emitCrossFilters,
 +    labelMap,
 +    groupby,
-+    selectedValues,
++    selectedValues: {},
 +    onContextMenu,
 +    refs,
 +    coltypeMapping,
@@ -1171,10 +1411,10 @@ index 0000000..459c6d3
 +}
 diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/types.ts b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/types.ts
 new file mode 100644
-index 0000000..a9a9563
+index 0000000..d80f6b8
 --- /dev/null
 +++ b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/types.ts
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,65 @@
 +/**
 + * Licensed to the Apache Software Foundation (ASF) under one
 + * or more contributor license agreements.  See the NOTICE file
@@ -1204,6 +1444,12 @@ index 0000000..a9a9563
 +export type EchartsLgaMapFormData = QueryFormData & {
 +  groupby: QueryFormColumn[];
 +  geomColumn?: string;
++  lonColumn?: string;
++  latColumn?: string;
++  pointNameColumn?: string;
++  showPoints: boolean;
++  areaStyle: string;
++  pointColor: string;
 +  metric?: string;
 +  numberFormat: string;
 +  linearColorScheme?: string;
@@ -1225,6 +1471,9 @@ index 0000000..a9a9563
 +  showLegend: true,
 +  labelFontSize: 10,
 +  hideZeroCounts: true,
++  showPoints: true,
++  areaStyle: 'count',
++  pointColor: '#d6336c',
 +};
 +
 +export type LgaMapChartTransformedProps =
@@ -1232,7 +1481,7 @@ index 0000000..a9a9563
 +    CrossFilterTransformedProps &
 +    ContextMenuTransformedProps;
 diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/components/Echart.tsx b/superset-frontend/plugins/plugin-chart-echarts/src/components/Echart.tsx
-index 95e3148..629d4e4 100644
+index 95e3148..7374306 100644
 --- a/superset-frontend/plugins/plugin-chart-echarts/src/components/Echart.tsx
 +++ b/superset-frontend/plugins/plugin-chart-echarts/src/components/Echart.tsx
 @@ -47,6 +47,7 @@ import {
@@ -1243,11 +1492,20 @@ index 95e3148..629d4e4 100644
  } from 'echarts/charts';
  import { CanvasRenderer } from 'echarts/renderers';
  import {
-@@ -113,6 +114,7 @@ use([
+@@ -61,6 +62,7 @@ import {
+   AriaComponent,
+   MarkAreaComponent,
+   MarkLineComponent,
++  GeoComponent,
+ } from 'echarts/components';
+ import { LabelLayout } from 'echarts/features';
+ import { EchartsHandler, EchartsProps, EchartsStylesProps } from '../types';
+@@ -113,6 +115,8 @@ use([
    TitleComponent,
    VisualMapComponent,
    LabelLayout,
 +  MapChart,
++  GeoComponent,
  ]);
  
  const loadLocale = async (locale: string) => {
