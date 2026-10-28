@@ -129,10 +129,10 @@ index 0000000..ef9e8cb
 +}
 diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/controlPanel.tsx b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/controlPanel.tsx
 new file mode 100644
-index 0000000..122962b
+index 0000000..bfea99e
 --- /dev/null
 +++ b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/controlPanel.tsx
-@@ -0,0 +1,254 @@
+@@ -0,0 +1,274 @@
 +/**
 + * Licensed to the Apache Software Foundation (ASF) under one
 + * or more contributor license agreements.  See the NOTICE file
@@ -171,6 +171,7 @@ index 0000000..122962b
 +  showPoints,
 +  areaStyle,
 +  pointColor,
++  legendSize,
 +} = DEFAULT_FORM_DATA;
 +
 +const config: ControlPanelConfig = {
@@ -361,6 +362,25 @@ index 0000000..122962b
 +              renderTrigger: true,
 +              default: showPoints,
 +              description: t('Draw dots for rows that have a longitude and latitude.'),
++            },
++          },
++        ],
++        [
++          {
++            name: 'legend_size',
++            config: {
++              type: 'SelectControl',
++              label: t('Colour scale size'),
++              renderTrigger: true,
++              default: legendSize,
++              clearable: false,
++              choices: [
++                ['1', t('Small')],
++                ['1.5', t('Medium')],
++                ['2', t('Large')],
++                ['3', t('Extra large')],
++              ],
++              description: t('Size of the colour scale in the corner of the map.'),
 +            },
 +          },
 +        ],
@@ -1061,10 +1081,10 @@ index 0000000..c080630
 +}
 diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/transformProps.ts b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/transformProps.ts
 new file mode 100644
-index 0000000..8287bc4
+index 0000000..e41f5c3
 --- /dev/null
 +++ b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/transformProps.ts
-@@ -0,0 +1,344 @@
+@@ -0,0 +1,354 @@
 +/**
 + * Licensed to the Apache Software Foundation (ASF) under one
 + * or more contributor license agreements.  See the NOTICE file
@@ -1147,16 +1167,24 @@ index 0000000..8287bc4
 +  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 +}
 +
-+function colorAt(colors: string[], t: number): string {
++function colorAt(colors: string[], t: number): RGB {
 +  const clamped = Math.min(1, Math.max(0, t));
-+  if (colors.length === 1) return colors[0];
++  if (colors.length === 1) return toRgb(colors[0]);
 +  const pos = clamped * (colors.length - 1);
 +  const i = Math.min(colors.length - 2, Math.floor(pos));
 +  const f = pos - i;
 +  const a = toRgb(colors[i]);
 +  const b = toRgb(colors[i + 1]);
-+  const mix = a.map((v, k) => Math.round(v + (b[k] - v) * f));
-+  return `rgb(${mix[0]},${mix[1]},${mix[2]})`;
++  return [
++    Math.round(a[0] + (b[0] - a[0]) * f),
++    Math.round(a[1] + (b[1] - a[1]) * f),
++    Math.round(a[2] + (b[2] - a[2]) * f),
++  ];
++}
++
++// Relative luminance (0 dark .. 1 light) used to pick a readable label colour.
++function luminance([r, g, b]: RGB): number {
++  return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
 +}
 +
 +export default function transformProps(
@@ -1188,6 +1216,7 @@ index 0000000..8287bc4
 +    showPoints,
 +    areaStyle,
 +    pointColor,
++    legendSize,
 +    labelFontSize,
 +    hideZeroCounts,
 +    sliceId,
@@ -1266,20 +1295,21 @@ index 0000000..8287bc4
 +  const shadeByCount = areaStyle === 'count';
 +  const regions = Object.keys(areaValues).map(key => {
 +    const value = areaValues[key];
++    const rgb = colorAt(colors, maxValue > 0 ? value / maxValue : 0);
 +    return {
 +      name: key,
 +      itemStyle: {
-+        areaColor: shadeByCount
-+          ? colorAt(colors, maxValue > 0 ? value / maxValue : 0)
-+          : areaStyle,
++        areaColor: shadeByCount ? `rgb(${rgb[0]},${rgb[1]},${rgb[2]})` : areaStyle,
 +      },
 +      label: {
 +        show: shadeByCount && showLabels && !(hideZeroCounts && value === 0),
 +        formatter: `${areaNames[key]}\n${formatter(value)}`,
++        color: luminance(rgb) < 0.45 ? '#ffffff' : '#111111',
 +      },
 +    };
 +  });
 +
++  const k = Number(legendSize) || 1.5;
 +  const legendGraphic = showLegend && shadeByCount
 +    ? [
 +        {
@@ -1289,7 +1319,7 @@ index 0000000..8287bc4
 +          children: [
 +            {
 +              type: 'rect',
-+              shape: { x: 0, y: 0, width: 14, height: 90 },
++              shape: { x: 0, y: 0, width: 14 * k, height: 90 * k },
 +              style: {
 +                fill: {
 +                  type: 'linear',
@@ -1312,22 +1342,22 @@ index 0000000..8287bc4
 +            {
 +              type: 'text',
 +              style: {
-+                x: 20,
++                x: 14 * k + 6,
 +                y: 0,
 +                text: formatter(maxValue),
 +                fill: theme.colorText,
-+                fontSize: 11,
++                fontSize: Math.round(11 * k),
 +                textVerticalAlign: 'top',
 +              },
 +            },
 +            {
 +              type: 'text',
 +              style: {
-+                x: 20,
-+                y: 90,
++                x: 14 * k + 6,
++                y: 90 * k,
 +                text: formatter(0),
 +                fill: theme.colorText,
-+                fontSize: 11,
++                fontSize: Math.round(11 * k),
 +                textVerticalAlign: 'bottom',
 +              },
 +            },
@@ -1411,10 +1441,10 @@ index 0000000..8287bc4
 +}
 diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/types.ts b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/types.ts
 new file mode 100644
-index 0000000..d80f6b8
+index 0000000..a414049
 --- /dev/null
 +++ b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/types.ts
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,67 @@
 +/**
 + * Licensed to the Apache Software Foundation (ASF) under one
 + * or more contributor license agreements.  See the NOTICE file
@@ -1449,6 +1479,7 @@ index 0000000..d80f6b8
 +  pointNameColumn?: string;
 +  showPoints: boolean;
 +  areaStyle: string;
++  legendSize: string;
 +  pointColor: string;
 +  metric?: string;
 +  numberFormat: string;
@@ -1473,6 +1504,7 @@ index 0000000..d80f6b8
 +  hideZeroCounts: true,
 +  showPoints: true,
 +  areaStyle: 'count',
++  legendSize: '1.5',
 +  pointColor: '#d6336c',
 +};
 +
