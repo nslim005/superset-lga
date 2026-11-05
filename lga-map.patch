@@ -129,10 +129,10 @@ index 0000000..ef9e8cb
 +}
 diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/controlPanel.tsx b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/controlPanel.tsx
 new file mode 100644
-index 0000000..bfea99e
+index 0000000..674f3e4
 --- /dev/null
 +++ b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/controlPanel.tsx
-@@ -0,0 +1,274 @@
+@@ -0,0 +1,294 @@
 +/**
 + * Licensed to the Apache Software Foundation (ASF) under one
 + * or more contributor license agreements.  See the NOTICE file
@@ -172,6 +172,7 @@ index 0000000..bfea99e
 +  areaStyle,
 +  pointColor,
 +  legendSize,
++  labelMode,
 +} = DEFAULT_FORM_DATA;
 +
 +const config: ControlPanelConfig = {
@@ -276,6 +277,25 @@ index 0000000..bfea99e
 +              renderTrigger: true,
 +              default: showLabels,
 +              description: t('Print the area name and its count on the map.'),
++            },
++          },
++        ],
++        [
++          {
++            name: 'label_mode',
++            config: {
++              type: 'SelectControl',
++              label: t('When to show area names'),
++              renderTrigger: true,
++              default: labelMode,
++              clearable: false,
++              choices: [
++                ['always', t('Always printed on the map')],
++                ['hover', t('Only when hovering over an area')],
++              ],
++              description: t(
++                'Use hover when many small areas make printed names overlap.',
++              ),
 +            },
 +          },
 +        ],
@@ -1081,10 +1101,10 @@ index 0000000..c080630
 +}
 diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/transformProps.ts b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/transformProps.ts
 new file mode 100644
-index 0000000..e41f5c3
+index 0000000..59afeb2
 --- /dev/null
 +++ b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/transformProps.ts
-@@ -0,0 +1,354 @@
+@@ -0,0 +1,384 @@
 +/**
 + * Licensed to the Apache Software Foundation (ASF) under one
 + * or more contributor license agreements.  See the NOTICE file
@@ -1217,6 +1237,7 @@ index 0000000..e41f5c3
 +    areaStyle,
 +    pointColor,
 +    legendSize,
++    labelMode,
 +    labelFontSize,
 +    hideZeroCounts,
 +    sliceId,
@@ -1237,6 +1258,7 @@ index 0000000..e41f5c3
 +  const areaNames: Record<string, string> = {};
 +  const labelMap: Record<string, string[]> = {};
 +  const points: { name: string; value: [number, number, number] }[] = [];
++  const visitedKeys = new Set<string>();
 +  let maxValue = 0;
 +  let maxPoint = 0;
 +
@@ -1271,6 +1293,13 @@ index 0000000..e41f5c3
 +        return;
 +      }
 +      maxPoint = Math.max(maxPoint, value);
++      visitedKeys.add(
++        extractGroupbyLabel({
++          datum,
++          groupby: groupbyLabels,
++          coltypeMapping: {},
++        }),
++      );
 +      const lgaName = groupbyLabels.length
 +        ? cleanName(String(datum[groupbyLabels[groupbyLabels.length - 1]] ?? ''))
 +        : '';
@@ -1293,6 +1322,7 @@ index 0000000..e41f5c3
 +  const colors = scheme?.colors?.length ? scheme.colors : FALLBACK_COLORS;
 +
 +  const shadeByCount = areaStyle === 'count';
++  const hoverOnly = labelMode === 'hover';
 +  const regions = Object.keys(areaValues).map(key => {
 +    const value = areaValues[key];
 +    const rgb = colorAt(colors, maxValue > 0 ? value / maxValue : 0);
@@ -1302,9 +1332,29 @@ index 0000000..e41f5c3
 +        areaColor: shadeByCount ? `rgb(${rgb[0]},${rgb[1]},${rgb[2]})` : areaStyle,
 +      },
 +      label: {
-+        show: shadeByCount && showLabels && !(hideZeroCounts && value === 0),
-+        formatter: `${areaNames[key]}\n${formatter(value)}`,
-+        color: luminance(rgb) < 0.45 ? '#ffffff' : '#111111',
++        show:
++          !hoverOnly &&
++          showLabels &&
++          (shadeByCount
++            ? !(hideZeroCounts && value === 0)
++            : visitedKeys.has(key)),
++        formatter: shadeByCount
++          ? `${areaNames[key]}\n${formatter(value)}`
++          : areaNames[key],
++        color: shadeByCount && luminance(rgb) < 0.45 ? '#ffffff' : '#222222',
++      },
++      emphasis: {
++        label: {
++          show: showLabels,
++          formatter: shadeByCount
++            ? `${areaNames[key]}\n${formatter(value)}`
++            : areaNames[key],
++          color: '#111111',
++          fontWeight: 'bold',
++          backgroundColor: 'rgba(255,255,255,0.9)',
++          padding: [3, 6],
++          borderRadius: 3,
++        },
 +      },
 +    };
 +  });
@@ -1441,10 +1491,10 @@ index 0000000..e41f5c3
 +}
 diff --git a/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/types.ts b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/types.ts
 new file mode 100644
-index 0000000..a414049
+index 0000000..28c407e
 --- /dev/null
 +++ b/superset-frontend/plugins/plugin-chart-echarts/src/LgaMap/types.ts
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,69 @@
 +/**
 + * Licensed to the Apache Software Foundation (ASF) under one
 + * or more contributor license agreements.  See the NOTICE file
@@ -1480,6 +1530,7 @@ index 0000000..a414049
 +  showPoints: boolean;
 +  areaStyle: string;
 +  legendSize: string;
++  labelMode: string;
 +  pointColor: string;
 +  metric?: string;
 +  numberFormat: string;
@@ -1505,6 +1556,7 @@ index 0000000..a414049
 +  showPoints: true,
 +  areaStyle: 'count',
 +  legendSize: '1.5',
++  labelMode: 'always',
 +  pointColor: '#d6336c',
 +};
 +
